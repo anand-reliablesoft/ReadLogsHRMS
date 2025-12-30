@@ -1,0 +1,34 @@
+{
+  "deploymentSettings": {
+    "rootInstallPath": "C:\\BiometricServices",
+    "dataCollectionServicePath": "DataCollection",
+    "timeSyncServicePath": "TimeSync",
+    "description": "Biometric Attendance System Deployment Configuration",
+    "version": "1.0"
+  },
+  "serviceSettings": {
+    "dataCollectionService": {
+      "serviceName": "DataCollectionService",
+      "displayName": "Biometric Data Collection Service",
+      "description": "Collects attendance data from biometric devices",
+      "scheduledTaskName": "BiometricDataCollection",
+      "scheduleDescription": "Every 15 minutes, 6:00 AM - 8:00 PM, weekdays"
+    },
+    "timeSyncService": {
+      "serviceName": "TimeSyncService",
+      "displayName": "Biometric Time Sync Service", 
+      "description": "Synchronizes time across biometric attendance devices",
+      "scheduledTaskName": "TimeSyncService_Daily",
+      "scheduleDescription": "Daily at 2:00 AM"
+    }
+  },
+  "instructions": {
+    "rootInstallPath": "Change this path to your desired installation directory. Only modify the root path - subdirectories will be created automatically.",
+    "examples": [
+      "C:\\BiometricServices (default)",
+      "D:\\Services\\Biometric",
+      "C:\\Program Files\\BiometricAttendance",
+      "E:\\Applications\\AttendanceSystem"
+    ]
+  }
+}

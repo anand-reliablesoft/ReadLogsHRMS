@@ -2,6 +2,8 @@ using System;
 using System.Configuration;
 using System.Data;
 using System.Diagnostics;
+using System.IO;
+using System.Reflection;
 using System.ServiceProcess;
 using BiometricAttendance.Common.Interfaces;
 using BiometricAttendance.Common.Services;
@@ -114,6 +116,12 @@ namespace DataCollectionService
             
             try
             {
+                // Validate configuration before starting
+                if (!ValidateConfiguration())
+                {
+                    throw new InvalidOperationException("Configuration validation failed");
+                }
+                
                 // Get log directory from configuration
                 string logDirectory = ConfigurationManager.AppSettings["LogDirectory"] ?? "Logs";
                 
@@ -167,7 +175,8 @@ namespace DataCollectionService
                     
                     try
                     {
-                        // Open Access and SQL Server database connections
+                        // CRITICAL FIX: Get fresh connections for each machine
+                        // This prevents connection corruption from accumulating across machines
                         accessConn = _dbConnectionManager.GetAccessConnection();
                         sqlConn = _dbConnectionManager.GetSqlServerConnection();
                         
@@ -250,17 +259,32 @@ namespace DataCollectionService
                     }
                     finally
                     {
-                        // Close database connections after each machine
+                        // CRITICAL: Close database connections after each machine
+                        // This prevents connection corruption from accumulating
                         if (accessConn != null)
                         {
-                            _dbConnectionManager.CloseConnection(accessConn);
-                            accessConn = null;
+                            try
+                            {
+                                _dbConnectionManager.CloseConnection(accessConn);
+                                accessConn = null;
+                            }
+                            catch (Exception ex)
+                            {
+                                _fileLogger.LogError($"Error closing Access connection for machine {machine.MachineNumber}", ex);
+                            }
                         }
                         
                         if (sqlConn != null)
                         {
-                            _dbConnectionManager.CloseConnection(sqlConn);
-                            sqlConn = null;
+                            try
+                            {
+                                _dbConnectionManager.CloseConnection(sqlConn);
+                                sqlConn = null;
+                            }
+                            catch (Exception ex)
+                            {
+                                _fileLogger.LogError($"Error closing SQL connection for machine {machine.MachineNumber}", ex);
+                            }
                         }
                         
                         // Close machine-specific log file
@@ -271,7 +295,7 @@ namespace DataCollectionService
                     }
                 }
                 
-                // All machines processed, now do batch processing
+                // All machines processed, now launch batch processor in separate process
                 _fileLogger.Log("All machines processed successfully");
                 
                 if (Environment.UserInteractive)
@@ -279,8 +303,16 @@ namespace DataCollectionService
                     Console.WriteLine("All machines processed successfully");
                 }
                 
-                // Process raw logs into attendance records
-                ExecuteBatchProcessing(deleteAllMode);
+                // CRITICAL FIX: Launch batch processing in separate process to avoid Winsock corruption
+                // This completely isolates batch processing from device communication
+                LaunchBatchProcessor(deleteAllMode);
+                
+                _fileLogger.Log("DataCollectionService completed - batch processing launched in separate process");
+                
+                if (Environment.UserInteractive)
+                {
+                    Console.WriteLine("DataCollectionService completed - batch processing launched in separate process");
+                }
             }
             catch (Exception)
             {
@@ -312,68 +344,127 @@ namespace DataCollectionService
             }
         }
 
-        private void ExecuteBatchProcessing(bool deleteAllMode)
+        private void LaunchBatchProcessor(bool deleteAllMode)
         {
-            IDbConnection accessConn = null;
-            IDbConnection sqlConn = null;
+            Process process = null;
             
             try
             {
-                _fileLogger.Log("Starting batch processing of raw logs...");
+                _fileLogger.Log("Launching BatchProcessor in separate process...");
+                
+                // Get the directory where DataCollectionService.exe is located
+                string serviceDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+                string batchProcessorPath = Path.Combine(serviceDirectory, "BatchProcessor.exe");
+                
+                if (!File.Exists(batchProcessorPath))
+                {
+                    throw new FileNotFoundException($"BatchProcessor.exe not found at: {batchProcessorPath}");
+                }
+                
+                // Get log directory from configuration
+                string logDirectory = ConfigurationManager.AppSettings["LogDirectory"] ?? "Logs";
+                
+                // Ensure log directory is absolute path
+                if (!Path.IsPathRooted(logDirectory))
+                {
+                    logDirectory = Path.Combine(serviceDirectory, logDirectory);
+                }
+                
+                // Build command line arguments
+                string arguments = $"--deleteAllMode={deleteAllMode.ToString().ToLower()} --logDirectory=\"{logDirectory}\"";
+                
+                _fileLogger.Log($"Launching: {batchProcessorPath} {arguments}");
+                
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = batchProcessorPath,
+                    Arguments = arguments,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    WorkingDirectory = serviceDirectory
+                };
                 
                 if (Environment.UserInteractive)
                 {
-                    Console.WriteLine("Processing raw logs into attendance records...");
+                    Console.WriteLine($"Launching BatchProcessor: {batchProcessorPath}");
+                    Console.WriteLine($"Arguments: {arguments}");
                 }
                 
-                // Open database connections for batch processing
-                accessConn = _dbConnectionManager.GetAccessConnection();
-                sqlConn = _dbConnectionManager.GetSqlServerConnection();
+                process = Process.Start(startInfo);
                 
-                // Execute AttendanceRecordProcessor.ProcessRawLogs for batch processing
-                _attendanceRecordProcessor.ProcessRawLogs(accessConn, sqlConn, _fileLogger);
-                
-                _fileLogger.Log("Batch processing completed successfully");
-                
-                if (Environment.UserInteractive)
+                if (process == null)
                 {
-                    Console.WriteLine("Batch processing completed");
+                    throw new InvalidOperationException("Failed to start BatchProcessor process");
                 }
                 
-                // Update DeleteAll mode to false after successful processing
-                if (deleteAllMode)
+                // Read output for logging
+                string output = process.StandardOutput.ReadToEnd();
+                string error = process.StandardError.ReadToEnd();
+                
+                process.WaitForExit();
+                
+                if (!string.IsNullOrEmpty(output))
                 {
-                    _settingsProvider.SetDeleteAllMode(false);
-                    _fileLogger.Log("DeleteAll mode set to false");
+                    _fileLogger.Log($"BatchProcessor output: {output}");
+                }
+                
+                if (!string.IsNullOrEmpty(error))
+                {
+                    _fileLogger.LogError($"BatchProcessor error output: {error}", null);
+                }
+                
+                if (process.ExitCode == 0)
+                {
+                    _fileLogger.Log("BatchProcessor completed successfully");
                     
                     if (Environment.UserInteractive)
                     {
-                        Console.WriteLine("DeleteAll mode updated to false");
+                        Console.WriteLine("BatchProcessor completed successfully");
                     }
+                }
+                else
+                {
+                    string errorMsg = $"BatchProcessor failed with exit code: {process.ExitCode}";
+                    _fileLogger.LogError(errorMsg, null);
+                    
+                    if (Environment.UserInteractive)
+                    {
+                        Console.WriteLine($"ERROR: {errorMsg}");
+                    }
+                    
+                    throw new InvalidOperationException(errorMsg);
                 }
             }
             catch (Exception ex)
             {
-                _fileLogger.LogError("Error during batch processing", ex);
+                _fileLogger.LogError("Failed to launch BatchProcessor", ex);
                 
                 if (Environment.UserInteractive)
                 {
-                    Console.WriteLine($"ERROR during batch processing: {ex.Message}");
+                    Console.WriteLine($"ERROR launching BatchProcessor: {ex.Message}");
                 }
                 
                 throw;
             }
             finally
             {
-                // Close database connections
-                if (accessConn != null)
+                // Ensure process is properly disposed
+                if (process != null)
                 {
-                    _dbConnectionManager.CloseConnection(accessConn);
-                }
-                
-                if (sqlConn != null)
-                {
-                    _dbConnectionManager.CloseConnection(sqlConn);
+                    try
+                    {
+                        if (!process.HasExited)
+                        {
+                            process.Kill();
+                        }
+                        process.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        _fileLogger?.LogError("Error disposing BatchProcessor process", ex);
+                    }
                 }
             }
         }
@@ -454,6 +545,72 @@ namespace DataCollectionService
             }
             
             // Allow graceful service exit - do not rethrow
+        }
+
+        private bool ValidateConfiguration()
+        {
+            try
+            {
+                // Check if required configuration files exist
+                string accessDbPath = ConfigurationManager.AppSettings["AccessDbPath"] ?? "RCMSBio.mdb";
+                string sqlDsnFile = ConfigurationManager.AppSettings["SqlDsnFile"] ?? "ReadLogsHRMS.dsn";
+                
+                // Resolve paths relative to executable directory
+                string exeDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+                
+                if (!Path.IsPathRooted(accessDbPath))
+                {
+                    accessDbPath = Path.Combine(exeDirectory, accessDbPath);
+                }
+                
+                if (!Path.IsPathRooted(sqlDsnFile))
+                {
+                    sqlDsnFile = Path.Combine(exeDirectory, sqlDsnFile);
+                }
+
+                if (!File.Exists(accessDbPath))
+                {
+                    string errorMsg = $"Access database not found: {accessDbPath}";
+                    if (Environment.UserInteractive)
+                    {
+                        Console.WriteLine($"ERROR: {errorMsg}");
+                    }
+                    if (_fileLogger != null)
+                    {
+                        _fileLogger.LogError(errorMsg, null);
+                    }
+                    return false;
+                }
+
+                if (!File.Exists(sqlDsnFile))
+                {
+                    string errorMsg = $"SQL DSN file not found: {sqlDsnFile}";
+                    if (Environment.UserInteractive)
+                    {
+                        Console.WriteLine($"ERROR: {errorMsg}");
+                    }
+                    if (_fileLogger != null)
+                    {
+                        _fileLogger.LogError(errorMsg, null);
+                    }
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                string errorMsg = $"Configuration validation failed: {ex.Message}";
+                if (Environment.UserInteractive)
+                {
+                    Console.WriteLine($"ERROR: {errorMsg}");
+                }
+                if (_fileLogger != null)
+                {
+                    _fileLogger.LogError(errorMsg, ex);
+                }
+                return false;
+            }
         }
     }
 }

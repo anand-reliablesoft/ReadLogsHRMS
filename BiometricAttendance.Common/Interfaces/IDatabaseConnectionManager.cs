@@ -21,6 +21,13 @@ namespace BiometricAttendance.Common.Interfaces
         IDbConnection GetSqlServerConnection();
 
         /// <summary>
+        /// Gets a fresh SQL Server connection specifically for batch processing
+        /// Uses direct connection string to avoid ODBC driver corruption issues
+        /// </summary>
+        /// <returns>Open database connection</returns>
+        IDbConnection GetFreshSqlServerConnection();
+
+        /// <summary>
         /// Closes a database connection
         /// </summary>
         /// <param name="connection">Connection to close</param>

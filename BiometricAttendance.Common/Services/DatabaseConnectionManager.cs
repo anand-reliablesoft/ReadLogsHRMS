@@ -123,6 +123,97 @@ namespace BiometricAttendance.Common.Services
         }
 
         /// <summary>
+        /// Gets a fresh SQL Server connection specifically for batch processing
+        /// Uses direct connection string to avoid ODBC driver corruption issues
+        /// </summary>
+        public IDbConnection GetFreshSqlServerConnection()
+        {
+            try
+            {
+                if (_logger != null)
+                {
+                    _logger.Log("Creating fresh SQL Server connection for batch processing...");
+                }
+
+                // Read DSN file to get connection parameters
+                string driver = "";
+                string server = "";
+                string database = "";
+                string uid = "";
+                string pwd = "";
+
+                if (File.Exists(_sqlDsnFile))
+                {
+                    foreach (string line in File.ReadAllLines(_sqlDsnFile))
+                    {
+                        string trimmedLine = line.Trim();
+                        
+                        if (trimmedLine.StartsWith("DRIVER=", StringComparison.OrdinalIgnoreCase))
+                        {
+                            driver = trimmedLine.Substring(7);
+                        }
+                        else if (trimmedLine.StartsWith("SERVER=", StringComparison.OrdinalIgnoreCase))
+                        {
+                            server = trimmedLine.Substring(7);
+                        }
+                        else if (trimmedLine.StartsWith("DATABASE=", StringComparison.OrdinalIgnoreCase))
+                        {
+                            database = trimmedLine.Substring(9);
+                        }
+                        else if (trimmedLine.StartsWith("UID=", StringComparison.OrdinalIgnoreCase))
+                        {
+                            uid = trimmedLine.Substring(4);
+                        }
+                        else if (trimmedLine.StartsWith("PWD=", StringComparison.OrdinalIgnoreCase))
+                        {
+                            pwd = trimmedLine.Substring(4);
+                        }
+                    }
+                }
+
+                // Build fresh connection string with additional parameters to prevent corruption
+                string connectionString = $"Driver={{{driver}}};Server={server};Database={database};Uid={uid};Pwd={pwd};" +
+                                        "Connection Timeout=30;Command Timeout=30;LoginTimeout=15;" +
+                                        "ConnectRetryCount=0;ConnectRetryInterval=1;" +  // Disable automatic retry to avoid corruption
+                                        "MultipleActiveResultSets=No;ApplicationIntent=ReadWrite;" +
+                                        "Encrypt=No;TrustServerCertificate=Yes;Pooling=false;";  // Disable connection pooling
+
+                if (_logger != null)
+                {
+                    _logger.Log($"Fresh connection string: {connectionString.Replace(pwd, "***")}");
+                }
+
+                var connection = new OdbcConnection(connectionString);
+                
+                // Test the connection with a simple query before returning
+                connection.Open();
+                
+                using (var testCmd = connection.CreateCommand())
+                {
+                    testCmd.CommandText = "SELECT GETDATE()";
+                    testCmd.CommandTimeout = 15;
+                    var result = testCmd.ExecuteScalar();
+                    
+                    if (_logger != null)
+                    {
+                        _logger.Log($"Fresh connection test successful: {result}");
+                    }
+                }
+                
+                return connection;
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null)
+                {
+                    _logger.LogError("Failed to create fresh SQL Server connection", ex);
+                }
+                
+                throw new InvalidOperationException($"Failed to create fresh SQL Server connection: {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
         /// Closes a database connection
         /// </summary>
         public void CloseConnection(IDbConnection connection)
@@ -132,11 +223,19 @@ namespace BiometricAttendance.Common.Services
                 try
                 {
                     connection.Close();
+                    connection.Dispose();
                 }
                 catch (Exception ex)
                 {
                     // Log but don't throw - closing is best effort
-                    Console.WriteLine($"Error closing connection: {ex.Message}");
+                    if (_logger != null)
+                    {
+                        _logger.LogError($"Error closing connection: {ex.Message}", ex);
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Error closing connection: {ex.Message}");
+                    }
                 }
             }
         }

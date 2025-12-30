@@ -179,6 +179,14 @@ namespace BiometricAttendance.Common.Services
         /// </summary>
         public void InsertAttendanceRecord(AttendanceRecord record, IDbConnection connection)
         {
+            InsertAttendanceRecord(record, connection, null);
+        }
+
+        /// <summary>
+        /// Inserts an attendance record with duplicate check (with transaction)
+        /// </summary>
+        public void InsertAttendanceRecord(AttendanceRecord record, IDbConnection connection, IDbTransaction transaction)
+        {
             if (record == null)
                 throw new ArgumentNullException(nameof(record));
             
@@ -190,12 +198,12 @@ namespace BiometricAttendance.Common.Services
             {
                 _connectionManager.ExecuteWithRetry(connection, (conn) =>
                 {
-                    InsertAttendanceRecordInternal(record, conn);
+                    InsertAttendanceRecordInternal(record, conn, transaction);
                 }, "Insert attendance record to SQL Server");
             }
             else
             {
-                InsertAttendanceRecordInternal(record, connection);
+                InsertAttendanceRecordInternal(record, connection, transaction);
             }
         }
 
@@ -203,6 +211,14 @@ namespace BiometricAttendance.Common.Services
         /// Internal method to insert attendance record (used by retry logic)
         /// </summary>
         private void InsertAttendanceRecordInternal(AttendanceRecord record, IDbConnection connection)
+        {
+            InsertAttendanceRecordInternal(record, connection, null);
+        }
+
+        /// <summary>
+        /// Internal method to insert attendance record with transaction (used by retry logic)
+        /// </summary>
+        private void InsertAttendanceRecordInternal(AttendanceRecord record, IDbConnection connection, IDbTransaction transaction)
         {
             // Check for duplicate
             string checkSql = $@"
@@ -216,6 +232,7 @@ namespace BiometricAttendance.Common.Services
             using (var checkCommand = connection.CreateCommand())
             {
                 checkCommand.CommandText = checkSql;
+                checkCommand.Transaction = transaction;
                 AddParameter(checkCommand, record.EmpCode);
                 AddParameter(checkCommand, record.EntryDate);
                 AddParameter(checkCommand, record.InOutFlag);
@@ -238,6 +255,7 @@ namespace BiometricAttendance.Common.Services
             using (var command = connection.CreateCommand())
             {
                 command.CommandText = insertSql;
+                command.Transaction = transaction;
 
                 // Add parameters
                 AddParameter(command, record.EmpCode);
@@ -257,17 +275,52 @@ namespace BiometricAttendance.Common.Services
         /// <summary>
         /// Updates the transfer flag for a raw log record
         /// </summary>
-        public void UpdateRawLogTransferFlag(int id, IDbConnection connection)
+        public void UpdateRawLogTransferFlag(AttendanceLog log, IDbConnection connection)
         {
+            UpdateRawLogTransferFlag(log, connection, null);
+        }
+
+        /// <summary>
+        /// Updates the transfer flag for a raw log record (with transaction)
+        /// </summary>
+        public void UpdateRawLogTransferFlag(AttendanceLog log, IDbConnection connection, IDbTransaction transaction)
+        {
+            if (log == null)
+                throw new ArgumentNullException(nameof(log));
+                
             if (connection == null)
                 throw new ArgumentNullException(nameof(connection));
 
-            string updateSql = "UPDATE [0RawLog] SET vtrfFlag = '1' WHERE ID = ?";
+            // Update using the SAME fields used for duplicate checking in InsertRawLogInternal
+            string updateSql = @"
+                UPDATE [0RawLog] 
+                SET vtrfFlag = '1' 
+                WHERE vTMachineNumber = ? 
+                  AND vSEnrollNumber = ? 
+                  AND vYear = ? 
+                  AND vMonth = ? 
+                  AND vDay = ? 
+                  AND vHour = ? 
+                  AND vMinute = ? 
+                  AND vSecond = ? 
+                  AND vInOut = ?";
 
             using (var command = connection.CreateCommand())
             {
                 command.CommandText = updateSql;
-                AddParameter(command, id);
+                command.Transaction = transaction;
+                
+                // Use the SAME field order as in InsertRawLogInternal duplicate check
+                AddParameter(command, log.TMachineNumber);
+                AddParameter(command, log.SEnrollNumber);
+                AddParameter(command, log.Year);
+                AddParameter(command, log.Month);
+                AddParameter(command, log.Day);
+                AddParameter(command, log.Hour);
+                AddParameter(command, log.Minute);
+                AddParameter(command, log.Second);
+                AddParameter(command, log.InOut);
+                
                 command.ExecuteNonQuery();
             }
         }
@@ -281,7 +334,7 @@ namespace BiometricAttendance.Common.Services
                 throw new ArgumentNullException(nameof(connection));
 
             string sql = @"
-                SELECT ID, vTMachineNumber, vSMachineNumber, vSEnrollNumber, vVerifyMode, 
+                SELECT vTMachineNumber, vSMachineNumber, vSEnrollNumber, vVerifyMode, 
                        vYear, vMonth, vDay, vHour, vMinute, vSecond, vInOut 
                 FROM [0RawLog] 
                 WHERE vtrfFlag IS NULL OR vtrfFlag = '0' 
@@ -299,7 +352,7 @@ namespace BiometricAttendance.Common.Services
                     {
                         var log = new AttendanceLog
                         {
-                            ID = GetInt32(reader, "ID"),
+                            // Note: No ID field - we'll use combination of fields for identification
                             TMachineNumber = GetInt32(reader, "vTMachineNumber"),
                             SMachineNumber = GetInt32(reader, "vSMachineNumber"),
                             SEnrollNumber = GetInt32(reader, "vSEnrollNumber"),

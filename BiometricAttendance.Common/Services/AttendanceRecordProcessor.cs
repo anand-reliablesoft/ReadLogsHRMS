@@ -47,11 +47,12 @@ namespace BiometricAttendance.Common.Services
             {
                 logger.Log("Starting batch processing of raw logs...");
 
+                // CRITICAL FIX: Get unprocessed raw logs BEFORE starting transaction
+                // This prevents the "ExecuteReader requires transaction" error
+                var unprocessedLogs = _sqlRepository.GetUnprocessedRawLogs(sqlConn);
+
                 // Begin transaction for batch processing
                 transaction = sqlConn.BeginTransaction();
-
-                // Get unprocessed raw logs sorted chronologically
-                var unprocessedLogs = _sqlRepository.GetUnprocessedRawLogs(sqlConn);
 
                 int processedCount = 0;
                 int skippedCount = 0;
@@ -61,8 +62,24 @@ namespace BiometricAttendance.Common.Services
                 {
                     try
                     {
+                        // Validate log data
+                        if (log == null)
+                        {
+                            logger.LogError("Null log entry encountered, skipping", null);
+                            skippedCount++;
+                            continue;
+                        }
+
                         // Map enrollment number to employee ID
                         string empCode = _employeeMapper.GetEmployeeId(log.SEnrollNumber, accessConn);
+
+                        // Validate employee code
+                        if (string.IsNullOrWhiteSpace(empCode))
+                        {
+                            logger.LogError($"Empty employee code for enrollment {log.SEnrollNumber}, skipping", null);
+                            skippedCount++;
+                            continue;
+                        }
 
                         // Create attendance record
                         var attendanceRecord = new AttendanceRecord
@@ -71,7 +88,7 @@ namespace BiometricAttendance.Common.Services
                             TicketNo = 0,
                             EntryDate = log.GetDateTime().Date,
                             InOutFlag = log.InOut,
-                            EntryTime = log.GetDateTime().TimeOfDay,
+                            EntryTime = new DateTime(1900, 1, 1).Add(log.GetDateTime().TimeOfDay),
                             TrfFlag = 0,
                             UpdateUID = null,
                             Location = null,
@@ -79,10 +96,10 @@ namespace BiometricAttendance.Common.Services
                         };
 
                         // Insert attendance record (repository handles duplicate check)
-                        _sqlRepository.InsertAttendanceRecord(attendanceRecord, sqlConn);
+                        _sqlRepository.InsertAttendanceRecord(attendanceRecord, sqlConn, transaction);
 
                         // Update transfer flag to mark as processed
-                        _sqlRepository.UpdateRawLogTransferFlag(log.ID, sqlConn);
+                        _sqlRepository.UpdateRawLogTransferFlag(log, sqlConn, transaction);
 
                         processedCount++;
                         
@@ -92,7 +109,9 @@ namespace BiometricAttendance.Common.Services
                     catch (Exception ex)
                     {
                         errorCount++;
-                        logger.LogError($"Error processing raw log ID={log.ID}, Enroll={log.SEnrollNumber}", ex);
+                        string logId = log?.ID.ToString() ?? "unknown";
+                        int enrollNumber = log?.SEnrollNumber ?? 0;
+                        logger.LogError($"Error processing raw log ID={logId}, Enroll={enrollNumber}", ex);
                         // Continue processing remaining records
                     }
                 }

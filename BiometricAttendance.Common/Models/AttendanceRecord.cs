@@ -28,9 +28,9 @@ namespace BiometricAttendance.Common.Models
         public string InOutFlag { get; set; }
 
         /// <summary>
-        /// Time portion of attendance
+        /// Time portion of attendance (stored as datetime in database)
         /// </summary>
-        public TimeSpan EntryTime { get; set; }
+        public DateTime EntryTime { get; set; }
 
         /// <summary>
         /// Transfer flag (always 0, reserved for HR software)

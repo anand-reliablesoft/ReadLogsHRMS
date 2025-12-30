@@ -35,9 +35,19 @@ namespace BiometricAttendance.Common.Interfaces
         void InsertAttendanceRecord(AttendanceRecord record, IDbConnection connection);
 
         /// <summary>
+        /// Inserts an attendance record with duplicate check (with transaction)
+        /// </summary>
+        void InsertAttendanceRecord(AttendanceRecord record, IDbConnection connection, IDbTransaction transaction);
+
+        /// <summary>
         /// Updates the transfer flag for a raw log record
         /// </summary>
-        void UpdateRawLogTransferFlag(int id, IDbConnection connection);
+        void UpdateRawLogTransferFlag(AttendanceLog log, IDbConnection connection);
+
+        /// <summary>
+        /// Updates the transfer flag for a raw log record (with transaction)
+        /// </summary>
+        void UpdateRawLogTransferFlag(AttendanceLog log, IDbConnection connection, IDbTransaction transaction);
 
         /// <summary>
         /// Gets unprocessed raw logs sorted chronologically
